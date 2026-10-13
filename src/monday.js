@@ -1,7 +1,7 @@
-const { mondayToken, BOARDS, BOARD_BY_ID, ALL_COLUMN_IDS } = require('./config');
+const { mondayToken, BOARDS, BOARD_BY_ID, ALL_COLUMN_IDS, timeZone } = require('./config');
 
 const API_URL = 'https://api.monday.com/v2';
-const ITEM_FIELDS = `id name state board { id } column_values(ids: ${JSON.stringify(ALL_COLUMN_IDS)}) { id text }`;
+const ITEM_FIELDS = `id name state board { id } column_values(ids: ${JSON.stringify(ALL_COLUMN_IDS)}) { id text value }`;
 
 const stats = { callsToday: 0, day: new Date().toISOString().slice(0, 10) };
 
@@ -42,23 +42,42 @@ async function gql(query, variables = {}, attempt = 0) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Monday item -> sheet row values [Lead name, Date, Platform, Status, HR Name, Start Date]
+// Wall-clock date/time -> Google Sheets serial number (days since 1899-12-30).
+const serial = (y, mo, d, h = 0, mi = 0) => Date.UTC(y, mo - 1, d, h, mi) / 864e5 + 25569;
+
+// Monday stores date column time in UTC; convert it to `timeZone` wall-clock.
+const tzParts = new Intl.DateTimeFormat('en-US', {
+  timeZone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
+
+// Monday date column value -> { serial, hasTime } or '' if empty.
+function parseDate(cv) {
+  if (!cv?.value) return '';
+  let v;
+  try { v = JSON.parse(cv.value); } catch { return ''; }
+  if (!v?.date) return '';
+  const [y, mo, d] = v.date.split('-').map(Number);
+  if (!v.time) return { serial: serial(y, mo, d), hasTime: false };
+  const [h, mi] = v.time.split(':').map(Number);
+  const p = Object.fromEntries(tzParts.formatToParts(new Date(Date.UTC(y, mo - 1, d, h, mi))).map((x) => [x.type, Number(x.value)]));
+  return { serial: serial(p.year, p.month, p.day, p.hour, p.minute), hasTime: true };
+}
+
+// Monday item -> { name, date, dateContacted, platform, status, hr, startDate }
 function toRow(item) {
   const board = BOARD_BY_ID[item.board?.id];
   if (!board || item.state !== 'active') return null;
-  const val = (key) => {
-    const colId = board.cols[key];
-    if (!colId) return '';
-    return (item.column_values.find((c) => c.id === colId)?.text || '').trim();
+  const cv = (key) => item.column_values.find((c) => c.id === board.cols[key]);
+  const text = (key) => (board.cols[key] ? (cv(key)?.text || '').trim() : '');
+  return {
+    name: item.name.trim(),
+    date: parseDate(cv('date')),
+    dateContacted: parseDate(cv('dateContacted')),
+    platform: text('platform'),
+    status: text('status'),
+    hr: board.hr,
+    startDate: board.type === 'followup' ? text('startDate') : '',
   };
-  return [
-    item.name.trim(),
-    val('date').slice(0, 10), // drop time part if any
-    val('platform'),
-    val('status'),
-    board.hr,
-    board.type === 'followup' ? val('startDate') : '',
-  ];
 }
 
 // Fetch every item of every configured board. Returns Map<itemId, row>.

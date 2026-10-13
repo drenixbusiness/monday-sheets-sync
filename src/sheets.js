@@ -1,67 +1,133 @@
 const { google } = require('googleapis');
 const { sheetId, sheetName, googleEmail, googleKey } = require('./config');
 
-// Layout: column A = Monday item ID (hidden, used for matching),
-// columns B..G = the "Таблица1" table: Lead name | Date | Platform | Status | HR Name | Start Date
+// Columns are found by their header text in row 1, so columns can be moved or added in the sheet.
+// "Monday ID" (column A by default, hidden) matches rows to Monday items.
+const HEADERS = {
+  id: 'monday id',
+  name: 'lead name',
+  date: 'date',
+  dateContacted: 'date contacted',
+  platform: 'platform',
+  status: 'status',
+  hr: 'hr name',
+  startDate: 'start date',
+};
+const DATE_FORMAT = { type: 'DATE', pattern: 'mmm d, yyyy' };
+const DATE_TIME_FORMAT = { type: 'DATE_TIME', pattern: 'mmm d, yyyy, h:mm AM/PM' };
+
 const auth = new google.auth.JWT({ email: googleEmail, key: googleKey, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
 const api = google.sheets({ version: 'v4', auth });
 const q = `'${sheetName}'`;
 
-let meta = null; // { gridId, rowCount, tableId }
+let meta = null; // { gridId, rowCount, table, cols: { field: colIndex } }
+
+const colLetter = (i) => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + (i % 26));
 
 async function loadMeta() {
-  const res = await api.spreadsheets.get({ spreadsheetId: sheetId, fields: 'sheets(properties,tables)' });
+  const [res, head] = await Promise.all([
+    api.spreadsheets.get({ spreadsheetId: sheetId, fields: 'sheets(properties,tables)' }),
+    api.spreadsheets.values.get({ spreadsheetId: sheetId, range: `${q}!1:1` }),
+  ]);
   const sheet = res.data.sheets.find((s) => s.properties.title === sheetName);
   if (!sheet) throw new Error(`Sheet tab "${sheetName}" not found`);
+
+  const header = (head.data.values?.[0] || []).map((h) => String(h).trim().toLowerCase());
+  const cols = {};
+  for (const [field, title] of Object.entries(HEADERS)) {
+    const i = header.indexOf(title);
+    if (i >= 0) cols[field] = i;
+  }
+  if (cols.id === undefined) cols.id = 0;
+  const missing = Object.keys(HEADERS).filter((f) => cols[f] === undefined);
+  if (missing.length) throw new Error(`Sheet header not found: ${missing.map((f) => HEADERS[f]).join(', ')}`);
+
   meta = {
     gridId: sheet.properties.sheetId,
     rowCount: sheet.properties.gridProperties.rowCount,
     table: sheet.tables?.[0] || null,
+    cols,
+    lastCol: Math.max(...Object.values(cols)),
   };
   return meta;
 }
 
-// One-time layout: ID header in A1, column A hidden, Date column formatted as yyyy-mm-dd.
+// One-time layout: English locale (dates as "Jan 18, 2026"), ID header, ID column hidden.
 async function setup() {
+  await api.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId,
+    requestBody: { requests: [{ updateSpreadsheetProperties: { properties: { locale: 'en_US' }, fields: 'locale' } }] },
+  });
   await loadMeta();
+  const idCol = meta.cols.id;
   await api.spreadsheets.values.update({
-    spreadsheetId: sheetId, range: `${q}!A1`, valueInputOption: 'RAW', requestBody: { values: [['Monday ID']] },
+    spreadsheetId: sheetId, range: `${q}!${colLetter(idCol)}1`, valueInputOption: 'RAW', requestBody: { values: [['Monday ID']] },
   });
   await api.spreadsheets.batchUpdate({
     spreadsheetId: sheetId,
     requestBody: {
-      requests: [
-        {
-          updateDimensionProperties: {
-            range: { sheetId: meta.gridId, dimension: 'COLUMNS', startIndex: 0, endIndex: 1 },
-            properties: { hiddenByUser: true }, fields: 'hiddenByUser',
-          },
+      requests: [{
+        updateDimensionProperties: {
+          range: { sheetId: meta.gridId, dimension: 'COLUMNS', startIndex: idCol, endIndex: idCol + 1 },
+          properties: { hiddenByUser: true }, fields: 'hiddenByUser',
         },
-        {
-          repeatCell: {
-            range: { sheetId: meta.gridId, startRowIndex: 1, startColumnIndex: 2, endColumnIndex: 3 },
-            cell: { userEnteredFormat: { numberFormat: { type: 'DATE', pattern: 'yyyy-mm-dd' } } },
-            fields: 'userEnteredFormat.numberFormat',
-          },
-        },
-      ],
+      }],
     },
   });
 }
 
-// Reads A2:G. Returns [{ row (1-based), id, values[6] }]
+// Reads all data rows. Dates come back as serial numbers. Returns [{ row (1-based), id, cells: { field: value } }]
 async function readRows() {
   const res = await api.spreadsheets.values.get({
-    spreadsheetId: sheetId, range: `${q}!A2:G`, valueRenderOption: 'FORMATTED_VALUE',
+    spreadsheetId: sheetId,
+    range: `${q}!A2:${colLetter(meta.lastCol)}`,
+    valueRenderOption: 'UNFORMATTED_VALUE',
+    dateTimeRenderOption: 'SERIAL_NUMBER',
   });
-  return (res.data.values || []).map((r, i) => ({
-    row: i + 2,
-    id: String(r[0] || '').trim(),
-    values: Array.from({ length: 6 }, (_, k) => String(r[k + 1] ?? '')),
+  return (res.data.values || []).map((r, i) => {
+    const cells = {};
+    for (const [field, col] of Object.entries(meta.cols)) cells[field] = r[col] ?? '';
+    return { row: i + 2, id: String(cells.id).trim(), cells };
+  });
+}
+
+function sameCell(want, have) {
+  if (want && typeof want === 'object') return typeof have === 'number' && Math.abs(have - want.serial) < 1e-5;
+  return String(want).trim() === String(have).trim();
+}
+const sameRow = (item, cells) => Object.keys(item).every((f) => sameCell(item[f], cells[f]));
+
+function toCell(v) {
+  if (v && typeof v === 'object') {
+    return { userEnteredValue: { numberValue: v.serial }, userEnteredFormat: { numberFormat: v.hasTime ? DATE_TIME_FORMAT : DATE_FORMAT } };
+  }
+  return v === '' ? {} : { userEnteredValue: { stringValue: String(v) } };
+}
+
+// updateCells requests for rows starting at `startRow` (1-based). Only our columns are touched:
+// consecutive mapped columns are written as one block, other columns are left alone.
+function writeRequests(startRow, items) {
+  const fields = Object.keys(meta.cols).sort((a, b) => meta.cols[a] - meta.cols[b]);
+  const segments = [];
+  for (const f of fields) {
+    const last = segments[segments.length - 1];
+    if (last && meta.cols[f] === last.end) { last.fields.push(f); last.end++; }
+    else segments.push({ start: meta.cols[f], end: meta.cols[f] + 1, fields: [f] });
+  }
+  return segments.map((seg) => ({
+    updateCells: {
+      range: { sheetId: meta.gridId, startRowIndex: startRow - 1, endRowIndex: startRow - 1 + items.length, startColumnIndex: seg.start, endColumnIndex: seg.end },
+      rows: items.map((it) => ({ values: seg.fields.map((f) => toCell(it[f])) })),
+      fields: 'userEnteredValue,userEnteredFormat.numberFormat',
+    },
   }));
 }
 
-const same = (a, b) => a.every((v, i) => String(v).trim() === String(b[i] ?? '').trim());
+async function batch(requests) {
+  for (let i = 0; i < requests.length; i += 500) {
+    await api.spreadsheets.batchUpdate({ spreadsheetId: sheetId, requestBody: { requests: requests.slice(i, i + 500) } });
+  }
+}
 
 /**
  * Apply Monday state to the sheet.
@@ -79,21 +145,22 @@ async function apply(desired, { full = false } = {}) {
 
   for (const r of rows) {
     if (!r.id) {
-      if (r.values.every((v) => v === '')) freeRows.push(r.row);
+      if (Object.values(r.cells).every((v) => v === '')) freeRows.push(r.row);
       continue;
     }
     if (byId.has(r.id)) { toDelete.push(r.row); continue; } // duplicate row
     byId.set(r.id, r);
   }
 
-  const updates = []; // { row, id, values }
-  const appends = []; // { id, values }
+  const updates = []; // { row, item }
+  const appends = []; // item
   for (const [id, values] of desired) {
     const existing = byId.get(id);
     if (!values) { if (existing) toDelete.push(existing.row); continue; }
-    if (existing) { if (!same(values, existing.values)) updates.push({ row: existing.row, id, values }); }
-    else if (freeRows.length) updates.push({ row: freeRows.shift(), id, values });
-    else appends.push({ id, values });
+    const item = { id, ...values };
+    if (existing) { if (!sameRow(item, existing.cells)) updates.push({ row: existing.row, item }); }
+    else if (freeRows.length) updates.push({ row: freeRows.shift(), item });
+    else appends.push(item);
   }
   if (full) for (const [id, r] of byId) if (!desired.has(id)) toDelete.push(r.row);
 
@@ -102,43 +169,24 @@ async function apply(desired, { full = false } = {}) {
 
   // Make sure the grid has enough rows.
   if (lastRowAfter > meta.rowCount) {
-    await api.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests: [{ appendDimension: { sheetId: meta.gridId, dimension: 'ROWS', length: lastRowAfter - meta.rowCount + 500 } }] },
-    });
+    await batch([{ appendDimension: { sheetId: meta.gridId, dimension: 'ROWS', length: lastRowAfter - meta.rowCount + 500 } }]);
   }
 
-  const data = updates.map((u) => ({ range: `${q}!A${u.row}:G${u.row}`, values: [[u.id, ...u.values]] }));
-  if (appends.length) {
-    data.push({ range: `${q}!A${lastUsed + 1}:G${lastRowAfter}`, values: appends.map((a) => [a.id, ...a.values]) });
-  }
-  for (let i = 0; i < data.length; i += 500) {
-    await api.spreadsheets.values.batchUpdate({
-      spreadsheetId: sheetId, requestBody: { valueInputOption: 'USER_ENTERED', data: data.slice(i, i + 500) },
-    });
-  }
+  const requests = updates.flatMap((u) => writeRequests(u.row, [u.item]));
+  if (appends.length) requests.push(...writeRequests(lastUsed + 1, appends));
+  await batch(requests);
 
   // Grow the table so new rows are inside "Таблица1".
   if (meta.table && appends.length) {
     const range = { ...meta.table.range, sheetId: meta.gridId, endRowIndex: Math.max(meta.table.range.endRowIndex, lastRowAfter) };
-    await api.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: { requests: [{ updateTable: { table: { tableId: meta.table.tableId, range }, fields: 'range' } }] },
-    });
+    await batch([{ updateTable: { table: { tableId: meta.table.tableId, range }, fields: 'range' } }]);
   }
 
   // Delete bottom-up so row numbers stay valid.
   const del = [...new Set(toDelete)].sort((a, b) => b - a);
-  for (let i = 0; i < del.length; i += 500) {
-    await api.spreadsheets.batchUpdate({
-      spreadsheetId: sheetId,
-      requestBody: {
-        requests: del.slice(i, i + 500).map((r) => ({
-          deleteDimension: { range: { sheetId: meta.gridId, dimension: 'ROWS', startIndex: r - 1, endIndex: r } },
-        })),
-      },
-    });
-  }
+  await batch(del.map((r) => ({
+    deleteDimension: { range: { sheetId: meta.gridId, dimension: 'ROWS', startIndex: r - 1, endIndex: r } },
+  })));
 
   return { written: updates.length, appended: appends.length, deleted: del.length };
 }

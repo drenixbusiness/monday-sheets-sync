@@ -11,20 +11,20 @@ function required(name) {
 // Start Date is only read from follow-up boards; on new-lead boards it stays empty.
 const BOARDS = [
   // Alex Chester
-  { id: '1975685235', hr: 'Alex Chester', type: 'new', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkr6he2a' } },
-  { id: '1982791767', hr: 'Alex Chester', type: 'followup', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkr6he2a', startDate: 'color_mkr6rcmc' } },
+  { id: '1975685235', hr: 'Alex Chester', type: 'new', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkr6he2a' } },
+  { id: '1982791767', hr: 'Alex Chester', type: 'followup', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkr6he2a', startDate: 'color_mkr6rcmc' } },
   // Winston
-  { id: '5023206586', hr: 'Winston', type: 'new', cols: { date: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
-  { id: '5023206983', hr: 'Winston', type: 'followup', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
+  { id: '5023206586', hr: 'Winston', type: 'new', cols: { date: 'date_mkr8bc5', dateContacted: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
+  { id: '5023206983', hr: 'Winston', type: 'followup', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
   // Isaac
-  { id: '1975765917', hr: 'Isaac', type: 'new', cols: { date: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
-  { id: '1982847753', hr: 'Isaac', type: 'followup', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
+  { id: '1975765917', hr: 'Isaac', type: 'new', cols: { date: 'date_mkr8bc5', dateContacted: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
+  { id: '1982847753', hr: 'Isaac', type: 'followup', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
   // Tim Baker
-  { id: '5101948793', hr: 'Tim Baker', type: 'new', cols: { date: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
-  { id: '5101948852', hr: 'Tim Baker', type: 'followup', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
+  { id: '5101948793', hr: 'Tim Baker', type: 'new', cols: { date: 'date_mkr8bc5', dateContacted: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
+  { id: '5101948852', hr: 'Tim Baker', type: 'followup', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
   // Simon Cooper
-  { id: '5101948870', hr: 'Simon Cooper', type: 'new', cols: { date: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
-  { id: '5101948914', hr: 'Simon Cooper', type: 'followup', cols: { date: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
+  { id: '5101948870', hr: 'Simon Cooper', type: 'new', cols: { date: 'date_mkr8bc5', dateContacted: 'date_mkr6r9yv', platform: 'text9', status: 'color_mkr7p7bm' } },
+  { id: '5101948914', hr: 'Simon Cooper', type: 'followup', cols: { date: 'date_mkr8ym80', dateContacted: 'date_mkraat8n', platform: 'text9', status: 'color_mkrfhs3d', startDate: 'color_mkr6rcmc' } },
 ];
 
 module.exports = {
@@ -37,6 +37,9 @@ module.exports = {
   sheetName: process.env.GOOGLE_SHEET_TAB || 'Лист1',
   googleEmail: required('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
   googleKey: required('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY').replace(/\\n/g, '\n'),
+
+  // Timezone used to show Monday "Date" times in the sheet.
+  timeZone: process.env.SHEET_TIMEZONE || 'Asia/Tashkent',
 
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramAdmins: (process.env.TELEGRAM_ADMIN_IDS || '').split(',').map((s) => s.trim()).filter(Boolean),

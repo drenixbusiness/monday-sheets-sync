@@ -5,13 +5,15 @@ Syncs leads from the 10 Monday boards (New leads + Follow up for each HR) into t
 | Sheet column | Source |
 |---|---|
 | Lead name | item name |
-| Date | "Date contacted" column |
+| Date | Monday "Date" column (with time, timezone `SHEET_TIMEZONE`, default Asia/Tashkent) |
+| Date Contacted | "Date contacted" column |
 | Platform | "Platform" column |
 | Status | "Status" column (on boards that have it, the `Status'` one) |
 | HR Name | taken from which board the lead is on |
 | Start Date | "Start date" — only on Follow up boards, empty otherwise |
 
-Column A (hidden) holds the Monday item ID and matches rows to leads. **Don't delete it.**
+Columns are found by their **header names** (row 1), so you can add new columns or reorder them, but don't rename the headers.
+The hidden "Monday ID" column matches rows to leads. **Don't delete it.**
 When a lead moves from New leads to Follow up, its existing row is updated in place.
 
 ## How it works

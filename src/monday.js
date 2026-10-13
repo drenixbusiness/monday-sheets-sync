@@ -1,0 +1,120 @@
+const { mondayToken, BOARDS, BOARD_BY_ID, ALL_COLUMN_IDS } = require('./config');
+
+const API_URL = 'https://api.monday.com/v2';
+const ITEM_FIELDS = `id name state board { id } column_values(ids: ${JSON.stringify(ALL_COLUMN_IDS)}) { id text }`;
+
+const stats = { callsToday: 0, day: new Date().toISOString().slice(0, 10) };
+
+async function gql(query, variables = {}, attempt = 0) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (today !== stats.day) Object.assign(stats, { day: today, callsToday: 0 });
+  stats.callsToday++;
+
+  let json;
+  try {
+    const res = await fetch(API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: mondayToken, 'API-Version': '2024-10' },
+      body: JSON.stringify({ query, variables }),
+    });
+    if (res.status === 429 || res.status >= 500) throw new Error(`Monday HTTP ${res.status}`);
+    json = await res.json();
+  } catch (e) {
+    if (attempt < 4) {
+      await sleep(2000 * 2 ** attempt);
+      return gql(query, variables, attempt + 1);
+    }
+    throw e;
+  }
+
+  if (json.errors || json.error_code) {
+    const msg = JSON.stringify(json.errors || json);
+    if (/DAILY_LIMIT_EXCEEDED/.test(msg)) throw Object.assign(new Error('Monday daily API limit exceeded'), { dailyLimit: true });
+    const retryable = /Complexity|RATE_LIMIT|Rate Limit|INTERNAL_SERVER/i.test(msg);
+    if (retryable && attempt < 4) {
+      await sleep(5000 * 2 ** attempt);
+      return gql(query, variables, attempt + 1);
+    }
+    throw new Error(`Monday API error: ${msg}`);
+  }
+  return json.data;
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Monday item -> sheet row values [Lead name, Date, Platform, Status, HR Name, Start Date]
+function toRow(item) {
+  const board = BOARD_BY_ID[item.board?.id];
+  if (!board || item.state !== 'active') return null;
+  const val = (key) => {
+    const colId = board.cols[key];
+    if (!colId) return '';
+    return (item.column_values.find((c) => c.id === colId)?.text || '').trim();
+  };
+  return [
+    item.name.trim(),
+    val('date').slice(0, 10), // drop time part if any
+    val('platform'),
+    val('status'),
+    board.hr,
+    board.type === 'followup' ? val('startDate') : '',
+  ];
+}
+
+// Fetch every item of every configured board. Returns Map<itemId, row>.
+async function fetchAll() {
+  const rows = new Map();
+  for (const board of BOARDS) {
+    let data = await gql(
+      `query($b: [ID!]) { boards(ids: $b) { items_page(limit: 500) { cursor items { ${ITEM_FIELDS} } } } }`,
+      { b: [board.id] },
+    );
+    let page = data.boards[0].items_page;
+    for (;;) {
+      for (const item of page.items) {
+        const row = toRow(item);
+        if (row) rows.set(item.id, row);
+      }
+      if (!page.cursor) break;
+      data = await gql(
+        `query($c: String!) { next_items_page(limit: 500, cursor: $c) { cursor items { ${ITEM_FIELDS} } } }`,
+        { c: page.cursor },
+      );
+      page = data.next_items_page;
+    }
+  }
+  return rows;
+}
+
+// Fetch specific items. Returns Map<itemId, row|null>; null = item gone / archived / moved off our boards.
+async function fetchItems(ids) {
+  const result = new Map(ids.map((id) => [String(id), null]));
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const data = await gql(`query($ids: [ID!]) { items(ids: $ids, limit: 100) { ${ITEM_FIELDS} } }`, { ids: chunk });
+    for (const item of data.items) result.set(item.id, toRow(item));
+  }
+  return result;
+}
+
+// One API call: activity logs of all boards since `from`.
+// Returns { needFullSync: bool, logs: [{ id, event, data, created_at }] }
+async function fetchChanges(from) {
+  const data = await gql(
+    `query($b: [ID!], $f: ISO8601DateTime) { boards(ids: $b) { id activity_logs(from: $f, limit: 500) { id event data created_at } } }`,
+    { b: BOARDS.map((b) => b.id), f: from.toISOString() },
+  );
+  const logs = [];
+  let needFullSync = false;
+
+  for (const board of data.boards) {
+    if (board.activity_logs.length >= 500) needFullSync = true; // too many changes, just resync everything
+    for (const log of board.activity_logs) {
+      logs.push(log);
+      if (/^batch_/.test(log.event) && !/"pulse_ids"/.test(log.data)) needFullSync = true;
+    }
+  }
+  return { needFullSync, logs };
+}
+
+module.exports = { fetchAll, fetchItems, fetchChanges, stats };

@@ -34,7 +34,8 @@ module.exports = {
 
   mondayToken: required('MONDAY_TOKEN'),
   sheetId: required('GOOGLE_SHEET_ID'),
-  sheetName: process.env.GOOGLE_SHEET_TAB || 'Лист1',
+  // Empty = find the tab automatically by its headers (Lead name, HR Name, ...).
+  sheetName: process.env.GOOGLE_SHEET_TAB || '',
   googleEmail: required('GOOGLE_SERVICE_ACCOUNT_EMAIL'),
   googleKey: required('GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY').replace(/\\n/g, '\n'),
 

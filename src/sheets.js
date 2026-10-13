@@ -1,8 +1,8 @@
 const { google } = require('googleapis');
 const { sheetId, sheetName, googleEmail, googleKey } = require('./config');
 
-// Columns are found by their header text in row 1, so columns can be moved or added in the sheet.
-// "Monday ID" (column A by default, hidden) matches rows to Monday items.
+// The tab and its columns are found by header text in row 1, so tabs can be renamed and columns moved/added.
+// "Monday ID" (hidden; created after the last column if missing) matches rows to Monday items.
 const HEADERS = {
   id: 'monday id',
   name: 'lead name',
@@ -18,31 +18,41 @@ const DATE_TIME_FORMAT = { type: 'DATE_TIME', pattern: 'mmm d, yyyy, h:mm AM/PM'
 
 const auth = new google.auth.JWT({ email: googleEmail, key: googleKey, scopes: ['https://www.googleapis.com/auth/spreadsheets'] });
 const api = google.sheets({ version: 'v4', auth });
-const q = `'${sheetName}'`;
-
-let meta = null; // { gridId, rowCount, table, cols: { field: colIndex } }
+let meta = null; // { title, q, gridId, rowCount, table, cols: { field: colIndex }, idMissing }
 
 const colLetter = (i) => (i >= 26 ? colLetter(Math.floor(i / 26) - 1) : '') + String.fromCharCode(65 + (i % 26));
 
-async function loadMeta() {
-  const [res, head] = await Promise.all([
-    api.spreadsheets.get({ spreadsheetId: sheetId, fields: 'sheets(properties,tables)' }),
-    api.spreadsheets.values.get({ spreadsheetId: sheetId, range: `${q}!1:1` }),
-  ]);
-  const sheet = res.data.sheets.find((s) => s.properties.title === sheetName);
-  if (!sheet) throw new Error(`Sheet tab "${sheetName}" not found`);
+const quote = (title) => `'${title.replace(/'/g, "''")}'`;
 
-  const header = (head.data.values?.[0] || []).map((h) => String(h).trim().toLowerCase());
+// Picks the tab: GOOGLE_SHEET_TAB if it exists, otherwise the first tab whose row 1 has "Lead name" and "HR Name".
+async function loadMeta() {
+  const res = await api.spreadsheets.get({ spreadsheetId: sheetId, fields: 'sheets(properties,tables)' });
+  const heads = await api.spreadsheets.values.batchGet({
+    spreadsheetId: sheetId, ranges: res.data.sheets.map((sh) => `${quote(sh.properties.title)}!1:1`),
+  });
+  const tabs = res.data.sheets.map((sh, i) => ({
+    sheet: sh,
+    header: (heads.data.valueRanges[i].values?.[0] || []).map((h) => String(h).trim().toLowerCase()),
+  }));
+  const tab = tabs.find((t) => t.sheet.properties.title === sheetName)
+    || tabs.find((t) => t.header.includes(HEADERS.name) && t.header.includes(HEADERS.hr));
+  if (!tab) throw new Error('No tab with "Lead name" and "HR Name" headers found in the spreadsheet');
+  const { sheet, header } = tab;
+
   const cols = {};
   for (const [field, title] of Object.entries(HEADERS)) {
     const i = header.indexOf(title);
     if (i >= 0) cols[field] = i;
   }
-  if (cols.id === undefined) cols.id = 0;
+  const idMissing = cols.id === undefined;
+  if (idMissing) cols.id = header.length; // first empty column after the headers
   const missing = Object.keys(HEADERS).filter((f) => cols[f] === undefined);
   if (missing.length) throw new Error(`Sheet header not found: ${missing.map((f) => HEADERS[f]).join(', ')}`);
 
   meta = {
+    title: sheet.properties.title,
+    q: quote(sheet.properties.title),
+    idMissing,
     gridId: sheet.properties.sheetId,
     rowCount: sheet.properties.gridProperties.rowCount,
     table: sheet.tables?.[0] || null,
@@ -60,9 +70,11 @@ async function setup() {
   });
   await loadMeta();
   const idCol = meta.cols.id;
-  await api.spreadsheets.values.update({
-    spreadsheetId: sheetId, range: `${q}!${colLetter(idCol)}1`, valueInputOption: 'RAW', requestBody: { values: [['Monday ID']] },
-  });
+  if (meta.idMissing) {
+    await api.spreadsheets.values.update({
+      spreadsheetId: sheetId, range: `${meta.q}!${colLetter(idCol)}1`, valueInputOption: 'RAW', requestBody: { values: [['Monday ID']] },
+    });
+  }
   await api.spreadsheets.batchUpdate({
     spreadsheetId: sheetId,
     requestBody: {
@@ -80,7 +92,7 @@ async function setup() {
 async function readRows() {
   const res = await api.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: `${q}!A2:${colLetter(meta.lastCol)}`,
+    range: `${meta.q}!A2:${colLetter(meta.lastCol)}`,
     valueRenderOption: 'UNFORMATTED_VALUE',
     dateTimeRenderOption: 'SERIAL_NUMBER',
   });
@@ -96,6 +108,12 @@ function sameCell(want, have) {
   return String(want).trim() === String(have).trim();
 }
 const sameRow = (item, cells) => Object.keys(item).every((f) => sameCell(item[f], cells[f]));
+
+// Identifies a lead without its Monday ID: name + HR + Date Contacted.
+function matchKey(v) {
+  const dc = v.dateContacted && typeof v.dateContacted === 'object' ? v.dateContacted.serial : v.dateContacted;
+  return [String(v.name).trim().toLowerCase(), String(v.hr).trim().toLowerCase(), dc === '' ? '' : Math.round(Number(dc))].join('|');
+}
 
 function toCell(v) {
   if (v && typeof v === 'object') {
@@ -142,10 +160,16 @@ async function apply(desired, { full = false } = {}) {
   const byId = new Map();
   const freeRows = [];
   const toDelete = [];
+  const orphans = new Map(); // rows with data but no Monday ID (e.g. ID column was deleted), by matchKey
 
   for (const r of rows) {
     if (!r.id) {
       if (Object.values(r.cells).every((v) => v === '')) freeRows.push(r.row);
+      else {
+        const k = matchKey(r.cells);
+        if (!orphans.has(k)) orphans.set(k, []);
+        orphans.get(k).push(r);
+      }
       continue;
     }
     if (byId.has(r.id)) { toDelete.push(r.row); continue; } // duplicate row
@@ -155,8 +179,9 @@ async function apply(desired, { full = false } = {}) {
   const updates = []; // { row, item }
   const appends = []; // item
   for (const [id, values] of desired) {
-    const existing = byId.get(id);
+    let existing = byId.get(id);
     if (!values) { if (existing) toDelete.push(existing.row); continue; }
+    if (!existing) existing = orphans.get(matchKey(values))?.shift(); // re-attach row that lost its ID
     const item = { id, ...values };
     if (existing) { if (!sameRow(item, existing.cells)) updates.push({ row: existing.row, item }); }
     else if (freeRows.length) updates.push({ row: freeRows.shift(), item });
@@ -188,7 +213,7 @@ async function apply(desired, { full = false } = {}) {
     deleteDimension: { range: { sheetId: meta.gridId, dimension: 'ROWS', startIndex: r - 1, endIndex: r } },
   })));
 
-  return { written: updates.length, appended: appends.length, deleted: del.length };
+  return { written: updates.length, appended: appends.length, deleted: del.length, tab: meta.title };
 }
 
 module.exports = { setup, apply };

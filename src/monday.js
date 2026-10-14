@@ -63,12 +63,14 @@ function parseDate(cv) {
   return { serial: serial(p.year, p.month, p.day, p.hour, p.minute), hasTime: true };
 }
 
-// Monday item -> { name, date, dateContacted, platform, status, hr, startDate }
+// Monday item -> { name, date, dateContacted, platform, status, hr, startDate, notes }
 function toRow(item) {
   const board = BOARD_BY_ID[item.board?.id];
   if (!board || item.state !== 'active') return null;
   const cv = (key) => item.column_values.find((c) => c.id === board.cols[key]);
-  const text = (key) => (board.cols[key] ? (cv(key)?.text || '').trim() : '');
+  const text = (key) => [board.cols[key] || []].flat()
+    .map((id) => (item.column_values.find((c) => c.id === id)?.text || '').trim())
+    .find(Boolean) || '';
   return {
     name: item.name.trim(),
     date: parseDate(cv('date')),
@@ -77,6 +79,7 @@ function toRow(item) {
     status: text('status'),
     hr: board.hr,
     startDate: board.type === 'followup' ? text('startDate') : '',
+    notes: text('notes'),
   };
 }
 

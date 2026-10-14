@@ -12,7 +12,9 @@ const HEADERS = {
   status: 'status',
   hr: 'hr name',
   startDate: 'start date',
+  notes: ['notes', 'note'],
 };
+const OPTIONAL = ['notes']; // filled only if the sheet has this column
 const DATE_FORMAT = { type: 'DATE', pattern: 'mmm d, yyyy' };
 const DATE_TIME_FORMAT = { type: 'DATE_TIME', pattern: 'mmm d, yyyy, h:mm AM/PM' };
 
@@ -40,14 +42,15 @@ async function loadMeta() {
   const { sheet, header } = tab;
 
   const cols = {};
-  for (const [field, title] of Object.entries(HEADERS)) {
-    const i = header.indexOf(title);
+  for (const [field, titles] of Object.entries(HEADERS)) {
+    const i = header.findIndex((h) => [titles].flat().includes(h));
     if (i >= 0) cols[field] = i;
   }
   const idMissing = cols.id === undefined;
-  if (idMissing) cols.id = header.length; // first empty column after the headers
-  const missing = Object.keys(HEADERS).filter((f) => cols[f] === undefined);
-  if (missing.length) throw new Error(`Sheet header not found: ${missing.map((f) => HEADERS[f]).join(', ')}`);
+  // Put a recreated ID column on the far right, away from where people add new columns.
+  if (idMissing) cols.id = Math.max(header.length, sheet.properties.gridProperties.columnCount - 1);
+  const missing = Object.keys(HEADERS).filter((f) => cols[f] === undefined && !OPTIONAL.includes(f));
+  if (missing.length) throw new Error(`Sheet header not found: ${missing.map((f) => [HEADERS[f]].flat()[0]).join(', ')}`);
 
   meta = {
     title: sheet.properties.title,
@@ -107,7 +110,7 @@ function sameCell(want, have) {
   if (want && typeof want === 'object') return typeof have === 'number' && Math.abs(have - want.serial) < 1e-5;
   return String(want).trim() === String(have).trim();
 }
-const sameRow = (item, cells) => Object.keys(item).every((f) => sameCell(item[f], cells[f]));
+const sameRow = (item, cells) => Object.keys(meta.cols).every((f) => sameCell(item[f] ?? '', cells[f]));
 
 // Identifies a lead without its Monday ID: name + HR + Date Contacted.
 function matchKey(v) {
